@@ -52,7 +52,7 @@ SENSOR_NAMES = {0: 'fuel_level',
 SERVO_IDS = {name: device_id for device_id, name in SERVO_NAMES.items()}
 RELAY_IDS = {name: device_id for device_id, name in RELAY_NAMES.items()}
 
-stats = {'count': 0, 'last_time': 0}
+stats = {'count': 0, 'last_time': 0, 'last_alt': 0.0, 'last_alt_time': time.time(), 'speed': 0.0}
 log_buffer = deque(maxlen=200)
 
 
@@ -64,18 +64,29 @@ def telemetry_update(frame: Frame):
     payload = frame.payload
     if isinstance(payload, (tuple, list)):
         payload = payload[0] if payload else None
-    if payload is None:
-        return
 
     if frame.device_type == ids.DeviceID.SERVO:
+        if payload is None:
+            return
         name = SERVO_NAMES.get(frame.device_id)
         value = payload
+
     elif frame.device_type == ids.DeviceID.RELAY:
         name = RELAY_NAMES.get(frame.device_id)
-        value = payload == ids.OperationID.RELAY.value.OPEN
+        if name is None:
+            return
+
+        if payload is not None:
+            value = (payload is True) or (payload == 1) or (payload == ids.OperationID.RELAY.value.OPEN)
+        else:
+            value = (frame.operation == ids.OperationID.RELAY.value.OPEN)
+
     elif frame.device_type == ids.DeviceID.SENSOR:
+        if payload is None:
+            return
         name = SENSOR_NAMES.get(frame.device_id)
         value = payload
+
     else:
         return
 
@@ -95,8 +106,8 @@ def handle_frame(frame: Frame, registered: bool):
 SERVOS = [
     ('fuel_intake', 'Fuel intake'),
     ('oxidizer_intake', 'Oxidizer intake'),
-    ('fuel_valve', 'Fuel valve'),
-    ('oxidizer_valve', 'Oxidizer valve'),
+    ('fuel_valve', 'Fuel main'),
+    ('oxidizer_valve', 'Oxidizer main'),
 ]
 
 RELAYS = [
@@ -133,9 +144,9 @@ def relay_frame(key: str, state: str) -> Frame:
                  ids.BoardID.SOFTWARE,
                  ids.DeviceID.RELAY,
                  RELAY_IDS[key],
-                 ids.DataTypeID.INT16,
-                 ids.OperationID.RELAY.value.POSITION,
-                 operation)
+                 ids.DataTypeID.NO_DATA,
+                 operation,
+                 ())
 
 
 async def send_frames(frames: list):
@@ -162,6 +173,7 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
     servo_labels, relay_labels, sensor_labels = {}, {}, {}
     servo_state_labels = {}
     status_servo_labels, status_relay_labels = {}, {}
+    led_elements = {}
 
     def row(label_text: str):
         with ui.row().classes('w-full justify-between items-center'):
@@ -175,26 +187,38 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
             remove='text-red-400' if is_open else 'text-green-400',
         )
 
-    def preflight_controls_card():
-        staged_servos = {}
+    def create_led(key: str):
+        led = ui.element('div').classes(
+            'w-4 h-4 rounded-full transition-all duration-300 ease-in-out bg-gray-700 shrink-0'
+        )
+        led_elements[key] = led
+        return led
 
-        async def send_staged():
-            frames = [servo_frame(k, v) for k, v in staged_servos.items()]
-            staged_servos.clear()
-            await send_frames(frames)
+    def set_led_color(key: str, color: str):
+        if key not in led_elements:
+            return
+        led = led_elements[key]
+        colors = {
+            'red': 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.9)]',
+            'yellow': 'bg-yellow-400 shadow-[0_0_10px_rgba(250,204,21,0.9)]',
+            'green': 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.9)]',
+            'blue': 'bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.9)]',
+            'off': 'bg-gray-700 shadow-none',
+        }
+        all_classes = 'bg-red-500 bg-yellow-400 bg-green-500 bg-blue-500 bg-gray-700 shadow-[0_0_10px_rgba(239,68,68,0.9)] shadow-[0_0_10px_rgba(250,204,21,0.9)] shadow-[0_0_10px_rgba(34,197,94,0.9)] shadow-[0_0_10px_rgba(59,130,246,0.9)] shadow-none'
+        led.classes(remove=all_classes, add=colors.get(color, colors['off']))
 
+    def manual_controls_card():
         async def send_servo(key: str, position):
             await send_frames([servo_frame(key, position)])
 
         async def send_relay(key: str, state: str, label):
-            label.set_text(state)
+            label.text = state
             await send_frames([relay_frame(key, state)])
 
         with ui.column().classes('w-full h-full flex-1 justify-between gap-4 p-2'):
             with ui.column().classes('w-full gap-2 shrink-0'):
-                with ui.row().classes('w-full justify-between'):
-                    ui.label('Preflight Controls').classes('text-2xl font-bold')
-                    ui.button('SEND COMMANDS', on_click=send_staged).classes('bg-blue-600 text-white font-bold px-8 py-2 rounded-lg')
+                ui.label('Manual Controls').classes('text-2xl font-bold')
                 ui.separator()
 
             with ui.column().classes('w-full gap-4 flex-1 justify-center'):
@@ -205,13 +229,17 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
                         servo_state_labels[key] = ui.label('CLOSED').classes(
                             'text-red-400 font-mono text-lg whitespace-nowrap'
                         )
-                        servo_labels[key] = ui.label('0.00').classes('text-gray-200 font-mono text-lg whitespace-nowrap')
+                        servo_labels[key] = ui.label('0.00').classes(
+                            'text-gray-200 font-mono text-lg whitespace-nowrap')
 
-                        ui.button('OPEN', on_click=lambda k=key: send_servo(k, SERVO_OPEN_POS)).classes('px-4 shrink-0')
-                        ui.button('CLOSE', on_click=lambda k=key: send_servo(k, SERVO_CLOSED_POS)).classes('px-4 shrink-0')
+                        ui.button('OPEN', on_click=lambda e, k=key: send_servo(k, SERVO_OPEN_POS)).classes(
+                            'px-4 shrink-0')
+                        ui.button('CLOSE', on_click=lambda e, k=key: send_servo(k, SERVO_CLOSED_POS)).classes(
+                            'px-4 shrink-0')
 
                         ui.label('New value:').classes('text-gray-200 font-mono text-lg whitespace-nowrap')
-                        servo_new_val = ui.label('0.00').classes('text-gray-200 font-mono text-lg whitespace-nowrap min-w-[50px]')
+                        servo_new_val = ui.label('0.00').classes(
+                            'text-gray-200 font-mono text-lg whitespace-nowrap min-w-[50px]')
 
                         slider = (
                             ui.slider(min=0, max=100, value=0, step=0.1)
@@ -222,7 +250,8 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
                             )
                             .classes('flex-1')
                         )
-                        slider.on('update:model-value', lambda e, k=key: staged_servos.update({k: e.args}))
+                        ui.button('SET', on_click=lambda e, k=key, s=slider: send_servo(k, s.value)).classes(
+                            'px-4 shrink-0 bg-blue-600')
 
                 ui.separator().classes('my-2')
                 ui.label('Relays').classes(
@@ -231,14 +260,107 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
                 for key, name in RELAYS:
                     with ui.row().classes('w-full justify-between items-center gap-4'):
                         ui.label(name.upper()).classes('text-gray-400 font-medium whitespace-nowrap min-w-[140px]')
-                        relay_labels[key] = ui.label('CLOSED').classes('text-red-400 font-mono text-lg whitespace-nowrap')
+                        relay_labels[key] = ui.label('CLOSED').classes(
+                            'text-red-400 font-mono text-lg whitespace-nowrap')
                         ui.space().classes('flex-1')
 
                         ui.label('Last command:').classes('text-gray-200 font-mono text-lg whitespace-nowrap')
-                        relay_new_val = ui.label('NONE').classes('text-yellow-400 font-mono text-lg whitespace-nowrap min-w-[60px]')
+                        relay_new_val = ui.label('NONE').classes(
+                            'text-yellow-400 font-mono text-lg whitespace-nowrap min-w-[60px]')
 
-                        ui.button('OPEN', on_click=lambda k=key, l=relay_new_val: send_relay(k, 'OPEN', l)).classes('px-4 shrink-0')
-                        ui.button('CLOSE', on_click=lambda k=key, l=relay_new_val: send_relay(k, 'CLOSE', l)).classes('px-4 shrink-0')
+                        ui.button('OPEN', on_click=lambda e, k=key, l=relay_new_val: send_relay(k, 'OPEN', l)).classes(
+                            'px-4 shrink-0')
+                        ui.button('CLOSE',
+                                  on_click=lambda e, k=key, l=relay_new_val: send_relay(k, 'CLOSE', l)).classes(
+                            'px-4 shrink-0')
+
+            ui.separator().classes('my-2')
+
+    def burn_manipulation_card():
+        with ui.column().classes('w-full h-full flex-1 justify-between gap-4 p-2'):
+            with ui.column().classes('w-full gap-2 shrink-0'):
+                ui.label('Burn Manipulation').classes('text-2xl font-bold')
+                ui.separator()
+
+            with ui.column().classes('w-full gap-4 flex-1 justify-center'):
+                ui.label('Engine Parameters').classes(
+                    'text-sm font-semibold text-gray-400 uppercase tracking-wider mt-2')
+
+                with ui.row().classes('w-full justify-between items-center gap-4'):
+                    ui.label('TARGET THRUST').classes('text-gray-400 font-medium whitespace-nowrap min-w-[140px]')
+                    thrust_val = ui.label('0 %').classes(
+                        'text-gray-200 font-mono text-lg whitespace-nowrap min-w-[60px]')
+                    ui.slider(min=0, max=100, value=0, step=1).bind_value_to(
+                        thrust_val, 'text', forward=lambda v: f'{v:.0f} %'
+                    ).classes('flex-1')
+
+                with ui.row().classes('w-full justify-between items-center gap-4'):
+                    ui.label('BURN DURATION').classes('text-gray-400 font-medium whitespace-nowrap min-w-[140px]')
+                    duration_val = ui.label('5.0 s').classes(
+                        'text-gray-200 font-mono text-lg whitespace-nowrap min-w-[60px]')
+                    ui.slider(min=0.5, max=30.0, value=5.0, step=0.5).bind_value_to(
+                        duration_val, 'text', forward=lambda v: f'{v:.1f} s'
+                    ).classes('flex-1')
+
+                ui.separator().classes('my-2')
+
+                ui.label('Sequence Controls').classes('text-sm font-semibold text-gray-400 uppercase tracking-wider')
+                with ui.row().classes('w-full justify-between items-center gap-4'):
+                    ui.button('ARM ENGINE', on_click=lambda e: log_line('Engine ARMED')).classes(
+                        'px-6 shrink-0 bg-amber-600 text-white font-bold')
+                    ui.button('START BURN', on_click=lambda e: log_line('Burn sequence STARTED')).classes(
+                        'px-6 shrink-0 bg-red-600 text-white font-bold')
+                    ui.button('ABORT', on_click=lambda e: log_line('Burn ABORTED!')).classes(
+                        'px-6 shrink-0 bg-gray-700 text-white font-bold')
+
+            ui.separator().classes('my-2')
+
+    def automatic_controls_card():
+        with ui.column().classes('w-full h-full flex-1 justify-between gap-4 p-2'):
+            with ui.column().classes('w-full gap-2 shrink-0'):
+                ui.label('Automatic Controls').classes('text-2xl font-bold')
+                ui.separator()
+
+            with ui.row().classes('w-full flex-1 no-wrap gap-4 items-stretch'):
+                with ui.column().classes('w-1/2 flex-1 gap-4 overflow-y-auto pr-2'):
+                    ui.label('Status').classes('text-sm font-semibold text-gray-400 uppercase tracking-wider')
+
+                    with ui.column().classes('w-full gap-2 bg-zinc-900/50 p-3 rounded-lg border border-zinc-800'):
+                        with ui.row().classes('items-center gap-3 w-full'):
+                            create_led('status_preflight')
+                            ui.label('PREFLIGHT').classes('font-mono font-semibold text-gray-200')
+                        with ui.row().classes('items-center gap-3 w-full'):
+                            create_led('status_burn')
+                            ui.label('BURN').classes('font-mono font-semibold text-gray-200')
+                        with ui.row().classes('items-center gap-3 w-full'):
+                            create_led('status_descend')
+                            ui.label('DESCEND').classes('font-mono font-semibold text-gray-200')
+
+                    ui.separator().classes('my-1')
+
+                    ui.label('Checklist').classes('text-sm font-semibold text-gray-400 uppercase tracking-wider')
+
+                    checklist_items = [
+                        ('ox_filled', 'Oxidizer filled'),
+                        ('fuel_filled', 'Fuel filled'),
+                        ('intakes_closed', 'Intakes closed'),
+                        ('ox_pressurized', 'Oxidizer pressurized'),
+                        ('ignition', 'Ignition'),
+                        ('parachute', 'Parachute'),
+                    ]
+
+                    with ui.column().classes(
+                            'w-full gap-2.5 bg-zinc-900/50 p-3 rounded-lg border border-zinc-800 flex-1 justify-around'):
+                        for key, label in checklist_items:
+                            with ui.row().classes('items-center justify-between w-full'):
+                                ui.label(label).classes('font-medium text-gray-300')
+                                create_led(f'check_{key}')
+
+
+                ui.separator().props('vertical').classes('bg-gray-800')
+                with ui.column().classes(
+                        'w-1/2 flex-1 justify-center items-center text-gray-600 border border-dashed border-zinc-800 rounded-lg p-4'):
+                    ui.label('Automatic Sequence Telemetry').classes('text-sm font-mono text-gray-500 mt-2')
 
             ui.separator().classes('my-2')
 
@@ -293,8 +415,21 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
                             'data': [],
                         }],
                     }).classes('w-full h-full min-h-0')
-                with ui.card().classes('w-full flex-1 flex flex-col min-h-0'):
-                    preflight_controls_card()
+
+                with ui.card().classes('w-full flex-1 flex flex-col min-h-0 overflow-y-auto'):
+                    with ui.column().classes(
+                            'w-full h-full justify-center items-center text-gray-500 gap-2') as placeholder_panel:
+                        ui.icon('tune', size='64px')
+                        ui.label('Select a control panel from Manual Control menu').classes('text-lg font-semibold')
+
+                    with ui.column().classes('w-full h-full') as manual_panel:
+                        manual_controls_card()
+
+                    with ui.column().classes('w-full h-full') as burn_panel:
+                        burn_manipulation_card()
+
+                    with ui.column().classes('w-full h-full') as auto_panel:
+                        automatic_controls_card()
 
             with ui.column().classes('w-full flex-1 h-full min-h-0 justify-between gap-4'):
                 with ui.card().classes('w-full flex-1 flex flex-col justify-between'):
@@ -310,17 +445,44 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
                     ui.label('Manual Control').classes('text-2xl font-bold')
                     ui.separator()
                     with ui.column().classes('w-full gap-2 flex-1 justify-around'):
-                        ui.button('Preflight controls').classes('w-full')
-                        ui.button('Burn manipulation').classes('w-full')
-                        ui.button('Manual relay control').classes('w-full')
+                        btn_manual = ui.button('Manual controls').classes('w-full')
+                        btn_burn = ui.button('Burn manipulation').classes('w-full')
+                        btn_auto = ui.button('Automatic controls').classes('w-full')
+
+    active_panel = {'name': 'manual'}
+
+    def update_panels():
+        name = active_panel['name']
+        manual_panel.set_visibility(name == 'manual')
+        burn_panel.set_visibility(name == 'burn')
+        auto_panel.set_visibility(name == 'auto')
+        placeholder_panel.set_visibility(name is None)
+
+        btn_manual.props(f'color={"blue-7" if name == "manual" else "grey-9"}')
+        btn_burn.props(f'color={"blue-7" if name == "burn" else "grey-9"}')
+        btn_auto.props(f'color={"blue-7" if name == "auto" else "grey-9"}')
+
+    def toggle_panel(name: str):
+        if active_panel['name'] == name:
+            active_panel['name'] = None
+        else:
+            active_panel['name'] = name
+        update_panels()
+
+    btn_manual.on('click', lambda e: toggle_panel('manual'))
+    btn_burn.on('click', lambda e: toggle_panel('burn'))
+    btn_auto.on('click', lambda e: toggle_panel('auto'))
+
+    update_panels()
 
     def refresh():
+        now = time.time()
         count_label.text = f"Frames: {stats['count']}"
         if stats['last_time'] is None:
             age_label.text = 'Last frame: never'
             fresh = False
         else:
-            age = time.time() - stats['last_time']
+            age = now - stats['last_time']
             age_label.text = f"Last frame: {age:.1f} s ago"
             fresh = age < 2.0
         age_label.classes(
@@ -329,6 +491,13 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
         )
         while log_buffer:
             frame_log.push(log_buffer.popleft())
+
+        dt = now - stats['last_alt_time']
+        if dt > 0.05:
+            current_alt = data.get('altitude', 0.0)
+            stats['speed'] = abs(current_alt - stats['last_alt']) / dt
+            stats['last_alt'] = current_alt
+            stats['last_alt_time'] = now
 
         for key, _ in SERVOS:
             value = data[key]
@@ -348,6 +517,64 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
 
         for key, _, unit in SENSORS:
             sensor_labels[key].text = f"{format_Data(data[key], '.2f')} {unit}"
+
+        ox_lvl = float(data.get('oxidizer_level', 0.0))
+        fuel_lvl = float(data.get('fuel_level', 0.0))
+        ox_press = float(data.get('oxidizer_pressure', 0.0))
+        fuel_intake_closed = float(data.get('fuel_intake', 0.0)) == SERVO_CLOSED_POS
+        ox_intake_closed = float(data.get('oxidizer_intake', 0.0)) == SERVO_CLOSED_POS
+        igniter_active = bool(data.get('igniter', False))
+        parachute_active = bool(data.get('parachute', False))
+        speed = stats['speed']
+
+        if ox_lvl >= 100.0:
+            set_led_color('check_ox_filled', 'green')
+        elif ox_lvl > 0.0:
+            set_led_color('check_ox_filled', 'yellow')
+        else:
+            set_led_color('check_ox_filled', 'red')
+
+        if fuel_lvl >= 100.0:
+            set_led_color('check_fuel_filled', 'green')
+        elif fuel_lvl > 0.0:
+            set_led_color('check_fuel_filled', 'yellow')
+        else:
+            set_led_color('check_fuel_filled', 'red')
+
+        if fuel_intake_closed and ox_intake_closed:
+            set_led_color('check_intakes_closed', 'green')
+        elif fuel_intake_closed or ox_intake_closed:
+            set_led_color('check_intakes_closed', 'yellow')
+        else:
+            set_led_color('check_intakes_closed', 'red')
+
+        if 55.0 <= ox_press <= 65.0:
+            set_led_color('check_ox_pressurized', 'green')
+        elif ox_press > 0.0:
+            set_led_color('check_ox_pressurized', 'yellow')
+        else:
+            set_led_color('check_ox_pressurized', 'red')
+
+        if igniter_active and fuel_lvl > 0.0 and ox_lvl > 0.0:
+            set_led_color('check_ignition', 'green')
+        else:
+            set_led_color('check_ignition', 'red')
+
+        if parachute_active:
+            set_led_color('check_parachute', 'green')
+        elif speed < 30.0:
+            set_led_color('check_parachute', 'blue')
+        else:
+            set_led_color('check_parachute', 'red')
+
+        is_burn_phase = igniter_active and (fuel_lvl > 0.0 or ox_lvl > 0.0)
+        is_descend_phase = parachute_active or (
+                    not is_burn_phase and ox_lvl <= 0.0 and fuel_lvl <= 0.0 and data.get('altitude', 0.0) > 10.0)
+        is_preflight_phase = not is_burn_phase and not is_descend_phase
+
+        set_led_color('status_preflight', 'green' if is_preflight_phase else 'off')
+        set_led_color('status_burn', 'green' if is_burn_phase else 'off')
+        set_led_color('status_descend', 'green' if is_descend_phase else 'off')
 
     def safe_refresh():
         try:
