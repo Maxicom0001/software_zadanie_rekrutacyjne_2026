@@ -433,43 +433,55 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
                     ui.separator()
                     for key, title in RELAYS:
                         status_relay_labels[key] = led_row(title, key)
-
             with ui.column().classes('w-full flex-3 min-h-0 justify-between gap-4'):
                 with ui.card().classes('w-full flex-1 flex flex-col min-h-0'):
-                    ui.label('Chart').classes('text-xl font-bold')
-                    ui.echart({
-                        'backgroundColor': 'transparent',
-                        'xAxis': {
-                            'type': 'value',
-                            'name': 'x',
-                            'position': 'center',
-                            'axisLine': {'onZero': True},
-                            'minorTick': {'show': True},
-                        },
-                        'yAxis': {
-                            'type': 'value',
-                            'name': 'y',
-                            'position': 'center',
-                            'axisLine': {'onZero': True},
-                            'minorTick': {'show': True},
-                        },
-                        'series': [{
-                            'type': 'line',
-                            'data': [],
-                        }],
-                    }).classes('w-full h-full min-h-0')
+                    ui.label('Flight Chart').classes('text-xl font-bold')
+                    with ui.row().classes('w-full flex-1 no-wrap gap-4 min-h-0 items-stretch'):
+                        with ui.column().classes('w-1/5 h-full justify-around bg-zinc-900/50 p-3 rounded-lg border border-zinc-800 shrink-0'):
+                            with ui.row().classes('w-full justify-between items-center'):
+                                ui.label('Altitude').classes('text-gray-400 font-semibold')
+                                chart_alt_label = ui.label('0.00 m').classes('font-mono text-lg text-gray-200')
+                            with ui.row().classes('w-full justify-between items-center'):
+                                ui.label('Speed').classes('text-gray-400 font-semibold')
+                                chart_speed_label = ui.label('0.00 m/s').classes('font-mono text-lg text-gray-200')
+                            with ui.row().classes('w-full justify-between items-center'):
+                                ui.label('Tilt Angle').classes('text-gray-400 font-semibold')
+                                chart_tilt_label = ui.label('0.00 °').classes('font-mono text-lg text-gray-200')
 
-                with ui.card().classes('w-full flex-1 flex flex-col min-h-0 overflow-y-auto'):
-                    with ui.column().classes(
-                            'w-full h-full justify-center items-center text-gray-500 gap-2') as placeholder_panel:
-                        ui.icon('tune', size='64px')
-                        ui.label('Select a control panel from Manual Control menu').classes('text-lg font-semibold')
+                        with ui.column().classes('w-2/3 h-full min-h-0 flex-1'):
+                            ui.echart({
+                                'backgroundColor': 'transparent',
+                                'xAxis': {
+                                    'type': 'value',
+                                    'name': 'Position',
+                                    'position': 'center',
+                                    'axisLine': {'onZero': True},
+                                    'minorTick': {'show': True},
+                                },
+                                'yAxis': {
+                                    'type': 'value',
+                                    'name': 'Altitude',
+                                    'position': 'center',
+                                    'axisLine': {'onZero': True},
+                                    'minorTick': {'show': True},
+                                },
+                                'series': [{
+                                    'type': 'line',
+                                    'data': [],
+                                }],
+                            }).classes('w-full h-full min-h-0')
 
-                    with ui.column().classes('w-full h-full') as manual_panel:
-                        manual_controls_card()
+                    with ui.card().classes('w-full flex-1 flex flex-col min-h-0 overflow-y-auto'):
+                        with ui.column().classes(
+                                'w-full h-full justify-center items-center text-gray-500 gap-2') as placeholder_panel:
+                            ui.icon('tune', size='64px')
+                            ui.label('Select a control panel from Manual Control menu').classes('text-lg font-semibold')
 
-                    with ui.column().classes('w-full h-full') as auto_panel:
-                        automatic_controls_card()
+                        with ui.column().classes('w-full h-full') as manual_panel:
+                            manual_controls_card()
+
+                        with ui.column().classes('w-full h-full') as auto_panel:
+                            automatic_controls_card()
 
             with ui.column().classes('w-full flex-1 h-full min-h-0 justify-between gap-4'):
                 with ui.card().classes('w-full flex-1 flex flex-col justify-between'):
@@ -537,13 +549,16 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
         while log_buffer:
             frame_log.push(log_buffer.popleft())
 
-        dt = now - stats['last_alt_time']
-        if dt > 0.05:
-            current_alt = data.get('altitude', 0.0)
-            stats['speed'] = abs(current_alt - stats['last_alt']) / dt
+        current_alt = data.get('altitude', 0.0)
+        if current_alt != stats['last_alt']:
+            dt = now - stats['last_alt_time']
+            if dt > 0:
+                stats['speed'] = abs(current_alt - stats['last_alt']) / dt
             stats['last_alt'] = current_alt
             stats['last_alt_time'] = now
-
+        else:
+            if now - stats['last_alt_time'] > 0.5:
+                stats['speed'] = 0.0
         for key, _ in SERVOS:
             value = data[key]
             text = format_Data(value, '.1f')
@@ -573,6 +588,9 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
         igniter_active = bool(data.get('igniter', False))
         parachute_active = bool(data.get('parachute', False))
         speed = stats['speed']
+        chart_alt_label.text = f"{format_Data(data.get('altitude', 0.0), '.2f')} m"
+        chart_speed_label.text = f"{speed} m/s"
+        chart_tilt_label.text = f"{format_Data(data.get('nosecone_tilt', 0.0), '.2f')} °"
 
         ox_lvl = float(data.get('oxidizer_level', 0.0))
         fuel_lvl = float(data.get('fuel_level', 0.0))
