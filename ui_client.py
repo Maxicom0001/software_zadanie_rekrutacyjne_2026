@@ -592,11 +592,6 @@ def prep_ui(data: dict, refresh_s: float = 0.2):
         chart_speed_label.text = f"{speed} m/s"
         chart_tilt_label.text = f"{format_Data(data.get('nosecone_tilt', 0.0), '.2f')} °"
 
-        ox_lvl = float(data.get('oxidizer_level', 0.0))
-        fuel_lvl = float(data.get('fuel_level', 0.0))
-        fuel_intake_closed = float(data.get('fuel_intake', 0.0)) == SERVO_CLOSED_POS
-        ox_intake_closed = float(data.get('oxidizer_intake', 0.0)) == SERVO_CLOSED_POS
-
         if ox_lvl >= 100.0 and not ox_intake_closed:
             if now - auto_state['last_ox_close_time'] > 1.0:
                 background_tasks.create(send_frames([servo_frame('oxidizer_intake', SERVO_CLOSED_POS)]))
